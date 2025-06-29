@@ -1,0 +1,239 @@
+---
+title: "Data Prep"
+author: "Rami Krispin"
+date: last-modified
+format: 
+  html:
+    code-fold: false
+    warning: false
+---
+
+This notebook pulls the natural gas time series from the EIA API and prepares it for analysis. This includes the following steps:
+- Define the API parameters
+- Pull the natural gas metadata
+- Pull the natural gas time series data
+- Clean and format the data
+- Save the data as a CSV file for future use
+
+**General requirements:**
+- EIA API key, which can be obtained from the [EIA website](https://www.eia.gov/opendata/).
+- The EIAapi, dplyr, and plotly libraries
+
+
+<br>
+<br /><figure>
+ <img src="images/eia_api.png" width="100%" align="center"/></a>
+<figcaption> The EIA website</figcaption>
+</figure>
+
+<br>
+<br />
+
+## Loading the libraries
+
+```{r}
+#| label: loading libraries
+library(EIAapi)
+library(dplyr)
+library(plotly)
+library(reactable)
+library(pointblank)
+```
+
+## API Settings
+
+
+::: {.callout-note}
+The API key is stored in an environment variable called `EIA_API_KEY`
+:::
+
+
+Loading the API key and setting up the API path for natural gas API route:
+```{r}
+#| label: loading the API key
+api_key <- Sys.getenv("EIA_API_KEY")
+api_path_gas <- "natural-gas/cons/sum/data/"
+```
+
+
+
+Pulling the series metadata from the API:
+```{r}
+#| label: loading the metadata
+meta_gas_raw <- eia_metadata(
+    api_path = "natural-gas/cons/sum/data/facet/parent",
+    api_key = api_key
+)
+
+meta_gas <- meta_gas_raw$data
+head(meta_gas)
+```
+
+
+We will pull the unique area code identifier (i.e., state code):
+
+```{r}
+#| label: state code
+duoarea <- (meta_gas |> dplyr::select(duoarea) |> dplyr::distinct())$duoarea
+```
+
+And use it to pull the data for each state using the `eia_get` function:
+
+```{r}
+#| output: false
+#| label: pull the data
+d <- lapply(duoarea, function(i) {
+    print(i)
+    df <- NULL
+    df <- eia_get(
+        api_key = api_key,
+        api_path = api_path_gas,
+        frequency = "monthly",
+        data = "value",
+        facets = list(duoarea = i)
+    )
+}) |>
+    dplyr::bind_rows() |>
+    dplyr::mutate(date = as.Date(paste(period, "-01", sep = ""))) |>
+    dplyr::select(area_name = `area-name`, process, process_name = `process-name`, series, date, description = `series-description`, value, units)
+
+
+```
+
+
+Let's review the data structure:
+
+
+```{r}
+#| label: data head
+reactable(head(d, 20),
+columns = list(area_name = colDef(minWidth = 150),
+date = colDef(minWidth = 150),
+series = colDef(minWidth = 150), 
+process_name = colDef(minWidth = 150), 
+description = colDef(minWidth = 250)))
+```
+
+```{r}
+#| label: data structure 
+str(d)
+```
+
+
+
+```{r}
+#| label: check the data 
+unique(d$area_name)
+unique(d$process)
+unique(d$process_name)
+```
+
+
+```{r}
+#| label: data validation
+agent <- 
+  create_agent(
+    tbl = d,
+    tbl_name = "Natural Gas",
+    label = "US Natural Gas Validation"
+  ) |>
+  col_is_date(date) |>
+   col_vals_gt(columns = value, value = 0) |>
+   col_vals_not_null(columns = value) |>
+ interrogate()
+
+agent
+```
+
+
+## Reformat the State Labels
+
+Create state code mapping:
+```{r}
+states_abb <- data.frame(name = state.name, name_lower = tolower(state.name), code = state.abb)
+
+head(states_abb)
+```
+
+
+
+
+Map the state names to state codes to the main table:
+```{r}
+d$area_name_lower <- tolower(d$area_name)
+
+d1 <- d |>
+    dplyr::left_join(states_abb |> dplyr::select(name_lower, code), by = c("area_name_lower" = "name_lower"))
+
+
+d1$area_code <- NA
+d1$area_code <- ifelse(nchar(d1$area_name) == 6, substr(d1$area_name, start = 5, stop = 6), d1$code)
+d1$area_code <- ifelse(d1$area_name == "U.S.", "US", d1$area_code)
+
+d2 <- d1 |>
+    dplyr::left_join(
+        states_abb |>
+            dplyr::select(name, code),
+        by = c("area_code" = "code")
+    ) |>
+    dplyr::select(area_name = name, area_code, process, process_name, date, value, units, description)
+
+d2$area_name <- ifelse(is.na(d2$area_name) & d2$area_code == "US", "USA", d2$area_name)
+d2$area_name <- ifelse(is.na(d2$area_name) & d2$area_code == "DC", "Washington, D.C.", d2$area_name)
+```
+
+Let's review the data:
+```{r}
+reactable(head(d2, 10), 
+columns = list(area_name = colDef(minWidth = 150),
+date = colDef(minWidth = 150),
+process_name = colDef(minWidth = 150), 
+description = colDef(minWidth = 300)))
+```
+
+
+We validate the data:
+```{r}
+#| label: final data validation
+agent <- 
+  create_agent(
+    tbl = d2,
+    tbl_name = "Natural Gas",
+    label = "US Natural Gas Validation"
+  ) |>
+  col_is_date(date) |>
+   col_vals_gt(columns = value, value = 0) |>
+   col_vals_not_null(columns = value) |>
+   col_vals_not_null(columns = area_name) |>
+   col_vals_not_null(columns = area_code) |>
+ interrogate()
+
+agent
+```
+
+
+Plot the commercial consumption by state:
+
+```{r}
+d2 |>
+    dplyr::filter(process_name == "Commercial Consumption", area_name!= "USA") |>
+    dplyr::arrange(area_name, process_name, date) |>
+    plotly::plot_ly(
+        x = ~date, y = ~value,
+        color = ~area_name,
+        name = ~area_name,
+        type = "scatter",
+        mode = "line"
+    )
+
+```
+
+
+## Saving the Data
+```{r}
+us_gas <- d2
+saveRDS(us_gas, file = "./data/us_gas.RDS")
+
+us_gas_csv <- us_gas |> dplyr::select(area_name, process, process_name, date, description, value)
+write.csv(us_gas_csv, "./data/us_gas.csv", row.names = FALSE)
+```

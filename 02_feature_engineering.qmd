@@ -1,0 +1,251 @@
+---
+title: "Features Engineering"
+author: "Rami Krispin"
+date: last-modified
+format: 
+  html:
+    code-fold: false
+    warning: false
+---
+
+## Load libraries
+
+```{r}
+library(dplyr)
+library(plotly)
+library(reactable)
+library(fable)
+library(feasts)
+library(tsibble)
+
+```
+
+## Data
+
+Loading the saved data:
+
+```{r}
+us_gas <- readRDS(file = "./data/us_gas.RDS")
+
+reactable(head(us_gas),
+columns = list(area_name = colDef(minWidth = 150),
+date = colDef(minWidth = 150),
+process_name = colDef(minWidth = 150), 
+description = colDef(minWidth = 250)))
+```
+
+
+Reformat the `data.frame` into a tsibble object:
+```{r}
+ts_obj <- us_gas |>
+    dplyr::select(date, area_name, process, value) |>
+    dplyr::mutate(index = tsibble::yearmonth(date)) |>
+    as_tsibble(index = index, key = c(area_name, process))
+
+ts_obj
+
+keys <- attributes(ts_obj)$key
+```
+
+## Features Engineering
+
+The next step is to collapse the time series into a feature table. This includes looping over each series and:
+
+- Check for missing values and impute if possible
+- Drop series that does not have a sufficient number of observations
+- Calculate a set of features for each series
+
+We will use the [tsfeatures](https://pkg.robjhyndman.com/tsfeatures/) library to create for each series a set of features such as:
+
+- Trend
+- AutoCorrelation features
+- Arch stat features
+- Nonlinearity measurment feature
+
+
+```{r}
+features_df <- NULL
+features_df <- lapply(1:nrow(keys), function(i) {
+    d <- NULL
+    d <- ts_obj |>
+        dplyr::filter(
+            area_name == keys$area_name[i],
+            process == keys$process[i]
+        )
+
+    s <- TRUE
+    # Check for missing values and zeros
+    z <- which(d$value == 0)
+
+    m <- which(is.na(d$value))
+    if (length(m) > 0) {
+        if (length(m) < nrow(d) * 0.1 && length(z) == 0) {
+            if (any(diff(m) == 1)) {
+                x <- m[which(diff(m) == 1)]
+                for (n in x) {
+                    d$value[n] <- (d$value[n - 12] + d$value[n - 24] + d$value[n - 36]) / 3
+                }
+
+                y <- which(is.na(d$value))
+                if (length(y) > 0) {
+                    for (n in y) {
+                        if (n < nrow(d)) {
+                            d$value[n] <- (d$value[n - 1] + d$value[n + 1]) / 2
+                        } else {
+                            d$value[n] <- (d$value[n - 12] + d$value[n - 24]) / 2
+                        }
+                    }
+                }
+            } else {
+                for (n in m) {
+                    if (n < nrow(d)) {
+                        d$value[n] <- (d$value[n - 1] + d$value[n + 1]) / 2
+                    } else {
+                        d$value[n] <- (d$value[n - 12] + d$value[n - 24]) / 2
+                    }
+                }
+            }
+        } else {
+            s <- FALSE
+        }
+    }
+
+
+    if (s) {
+        f <- tsfeatures::tsfeatures(d$value)
+        f$arch_stat <- tsfeatures::arch_stat(d$value)
+        f <- cbind(f, t(as.data.frame(tsfeatures::autocorr_features(d$value))))
+        f$nonlinearity <- tsfeatures::nonlinearity(d$value)
+        f <- cbind(f, t(as.data.frame(tsfeatures::pacf_features(d$value))))
+
+        row.names(f) <- NULL
+        f$area_name <- keys$area_name[i]
+        f$process <- keys$process[i]
+        f$nperiods <- NULL
+        f$frequency <- NULL
+        f$seasonal_period <- NULL
+        f$success <- TRUE
+    } else {
+        f <- data.frame(success = FALSE)
+    }
+
+    return(f)
+}) |>
+    dplyr::bind_rows() |>
+    dplyr::select(area_name, process, dplyr::everything())
+
+```
+
+
+
+Remove missing values and failed calculations:
+
+```{r}
+table(features_df$success)
+features_clean <- na.omit(features_df)
+table(features_clean$success)
+
+features_clean <- features_clean |>
+    dplyr::filter(success) |>
+    dplyr::select(-success)
+```
+
+
+
+```{r}
+reactable(features_clean)
+```
+
+
+
+Calculating the PCA and merging its first three components with the features table: 
+
+```{r}
+pca <- features_clean |>
+    dplyr::select(-area_name, -process) |>
+    prcomp(scale = TRUE, center = TRUE)
+
+```
+
+
+
+```{r}
+pca_var <- data.frame(variance = (summary(pca))$importance[2,], cum = (summary(pca))$importance[3,])
+pca_var$pca <- 1:nrow(pca_var)
+
+pca_var |> 
+plotly::plot_ly(x = ~ pca, y = ~ round(100 * variance, 2), type = "bar", name = "Proportion of Variance") |>
+ plotly::add_trace(
+    y = ~round(100 * cumsum(variance), 2),
+    type = "scatter",
+    mode = "lines+markers",
+    name = "Cumulative Proportion",
+    line = list(color = "red"),
+    marker = list(color = "red")
+  ) |>
+plotly::layout(title = "PCA Variance", 
+xaxis = list(title = "PCA Component", tick0=1, dtick=5), yaxis = list(title = "Variance (%)"))
+```
+
+
+```{r}
+features <- cbind(features_clean, as.data.frame(pca$x[, 1:3]))
+
+reactable(head(features, 10))
+
+```
+
+
+
+Scale the features table:
+
+```{r}
+num_cols <- 3:(ncol(features) -3)
+features_scale <- cbind(scale(features[, num_cols]), features[, c("area_name", "process")])
+
+```
+Calculate the K-means and merge it back to features table:
+```{r}
+num_clusters <- 15
+nstart <- 25
+wss <- numeric(num_clusters)
+
+wss_df <- data.frame(cluster = 1:num_clusters, wss = NA)
+
+features_final <- features
+
+for(i in 1:num_clusters){
+    km <- NULL
+
+    km <- kmeans(features_scale[, 1:25], centers = i, nstart = nstart) 
+    wss_df$wss[i] <- km$tot.withinss
+
+    features_final[, paste0("cluster", i)] <- km[1]$cluster
+
+}
+
+
+
+```
+
+```{r}
+plotly::plot_ly(wss_df, x = ~ cluster, y = ~wss, type = "scatter", mode = "markers+lines") |>
+plotly::layout(title = " Within-Cluster Sum of Squares by Number of Cluster", 
+yaxis = list(title = "Total within-clusters sum of squares"), 
+xaxis = list(title = "Number of clusters"))
+```
+
+
+
+
+```{r}
+reactable(head(features_final, 10))
+```
+
+Save the features table:
+
+```{r}
+saveRDS(features_final, file = "./data/features.RDS")
+
+write.csv(features_final, "./data/features.csv", row.names = FALSE)
+```
