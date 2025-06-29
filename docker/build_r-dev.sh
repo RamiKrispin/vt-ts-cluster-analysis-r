@@ -17,7 +17,7 @@ fi
 
 # Setting the image name
 ver=0.0.1
-tag="${CPU}.${ver}"
+tag="virginia-tech-ts-workshop"
 docker_file=Dockerfile.r-dev
 image_name=$user_name/$image_label:$tag
 
