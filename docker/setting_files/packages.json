@@ -13,12 +13,16 @@
             "version": "1.11.0"
         },
         {
+            "package": "shinylive",
+            "version": "0.3.0"
+        },
+        {
             "package": "bslib",
             "version": "0.9.0"
         },
         {
             "package": "plotly",
-            "version": "4.11.0"
+            "version": "4.10.4"
         },
         {
             "package": "EIAapi",

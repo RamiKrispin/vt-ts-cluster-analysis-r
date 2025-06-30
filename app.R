@@ -1,18 +1,33 @@
 library(shiny)
 library(bslib)
 
-ts <- read.csv(file = "https://raw.githubusercontent.com/RamiKrispin/ts-cluster-analysis-r/refs/heads/main/data/us_gas.csv") |>
+ts <- read.csv(file = "https://raw.githubusercontent.com/RamiKrispin/vt-ts-cluster-analysis-r/refs/heads/main/data/us_gas.csv") |>
     dplyr::mutate(date = as.Date(date)) |>
     dplyr::mutate(
         index = tsibble::yearmonth(date),
         label = paste(area_name, process_name, sep = " - ")
     ) |>
     tsibble::as_tsibble(index = index, key = c(area_name, process_name))
-features <- read.csv(file = "https://raw.githubusercontent.com/RamiKrispin/ts-cluster-analysis-r/refs/heads/main/data/features.csv")
+features <- read.csv(file = "https://raw.githubusercontent.com/RamiKrispin/vt-ts-cluster-analysis-r/refs/heads/main/data/features.csv")
 
-features_list <- names(features)
 
-features_list <- features_list[-which(features_list %in% c("process", "PC1", "PC2", "PC3", "process", "area_name"))]
+remove_labels <- function(vector, pattern) {
+  # Use the `grepl` function to find matches of the pattern in the vector
+  indices_to_remove <- which(grepl(pattern, vector))
+  # Remove the matching elements from the vector
+  v<- vector[-indices_to_remove]   
+  return(v)
+}
+
+
+
+table_col_names <- names(features)
+
+table_col_names <- table_col_names[-which(table_col_names %in% c("process", "PC1", "PC2", "PC3", "process", "area_name"))]
+
+features_list <- remove_labels(vector = table_col_names, pattern = "cluster")
+
+
 
 keys <- attributes(ts)$key
 
@@ -76,7 +91,7 @@ ui <- page_navbar(
                     selectInput(
                         inputId = "c_num",
                         label = "Number of Clusters:",
-                        choices = c(2:5),
+                        choices = c(2:15),
                         selected = 2,
                         multiple = FALSE
                     )

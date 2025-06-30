@@ -53,4 +53,5 @@ apt-get update && apt-get install -y --no-install-recommends \
     libproj-dev \
     pandoc \
     unixodbc \
+    libarchive-dev \
     && rm -rf /var/lib/apt/lists/*
